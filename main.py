@@ -3,7 +3,6 @@ import requests
 import xml.etree.ElementTree as ET
 import pandas as pd
 import sys
-import os
 from lxml import etree
 from requests_html import AsyncHTMLSession
 from tqdm import tqdm
@@ -11,10 +10,6 @@ from tqdm import tqdm
 # Track failed and no-iframe URLs
 failed_urls = []
 no_iframe_urls = []
-
-# Directory to save no-form pages
-NO_FORM_DIR = "no_form_pages"
-os.makedirs(NO_FORM_DIR, exist_ok=True)  # Create directory if it doesn't exist
 
 def log_error(message):
     """Print errors to stderr for real-time visibility."""
@@ -55,15 +50,9 @@ async def extract_contact_iframe(url, retries=3):
                 print(f"✅ Successfully extracted iframe from {url} on attempt {attempt+1}/{retries}")
                 return extracted_iframes
             
-            # If no iframe found, save the full page content and log the URL
-            print(f"⚠️ No iframe found on {url}. Saving page for review.")
-            no_iframe_urls.append(url)
-
-            # Save the page content
-            page_filename = f"{NO_FORM_DIR}/{url.replace('https://', '').replace('/', '_')}.html"
-            with open(page_filename, "w", encoding="utf-8") as f:
-                f.write(r.html.html)
-
+            # If no iframe found, log the URL
+            print(f"⚠️ No iframe found on {url}. Logging it for review.")
+            no_iframe_urls.append({"page_url": url})
             return None
 
         except Exception as e:
@@ -87,20 +76,27 @@ def get_urls_from_sitemap(sitemap_url):
         log_error(f"❌ Error fetching sitemap: {e}")
         return []
 
-async def main():
+def run_sequentially(urls):
+    """Runs all URLs sequentially to avoid crashes."""
+    results = []
+    
+    # Process URLs sequentially with a progress bar
+    for url in tqdm(urls, desc="Scraping Progress"):
+        result = asyncio.run(extract_contact_iframe(url))
+        if result is not None:
+            results.extend(result)
+
+    return results
+
+def main():
     # Get the list of URLs from the sitemap
     sitemap_url = "https://www.sigma-rh.com/sitemap.xml"
     urls = get_urls_from_sitemap(sitemap_url)
 
     print(f"🚀 Running in sequential mode. Processing {len(urls)} URLs...")
 
-    results = []
-    
-    # Process URLs sequentially with a progress bar
-    for url in tqdm(urls, desc="Scraping Progress"):
-        result = await extract_contact_iframe(url)
-        if result is not None:
-            results.extend(result)
+    # Process URLs sequentially
+    results = run_sequentially(urls)
 
     # Convert results to a DataFrame
     df = pd.DataFrame(results, columns=["page_url", "src_url", "iframe_html"])
@@ -117,17 +113,15 @@ async def main():
                 f.write(url + "\n")
         print(f"⚠️ {len(failed_urls)} URLs failed due to errors and were saved to {failed_file}")
 
-    # Save "No iframe found" URLs
+    # Save "No iframe found" URLs to a CSV
     if no_iframe_urls:
-        no_iframe_file = "no_iframe_urls.txt"
-        with open(no_iframe_file, "w") as f:
-            for url in no_iframe_urls:
-                f.write(url + "\n")
+        no_iframe_df = pd.DataFrame(no_iframe_urls, columns=["page_url"])
+        no_iframe_file = "no_iframes.csv"
+        no_iframe_df.to_csv(no_iframe_file, index=False)
         print(f"⚠️ {len(no_iframe_urls)} URLs had no iframes and were saved to {no_iframe_file}")
 
     print(f"✅ Processing complete. {len(df)} valid iframes found. Results saved to {output_file}.")
-    print(f"📂 Pages without forms saved in `{NO_FORM_DIR}/`.")
 
 # Run the script
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
