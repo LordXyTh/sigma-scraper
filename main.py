@@ -1,31 +1,42 @@
-import asyncio
 import requests
 import xml.etree.ElementTree as ET
 import pandas as pd
 import sys
 from lxml import etree
-from requests_html import AsyncHTMLSession
+from requests_html import HTMLSession
 from tqdm import tqdm
 
 # Track failed and no-iframe URLs
 failed_urls = []
 no_iframe_urls = []
+results = []  # Store extracted iframes
+
+# Initialize a global session
+session = None
+
+def get_session():
+    """Returns an active session, creates a new one if needed."""
+    global session
+    if session is None:
+        session = HTMLSession()
+    return session
 
 def log_error(message):
     """Print errors to stderr for real-time visibility."""
     print(f"❌ {message}", file=sys.stderr)
 
-async def extract_contact_iframe(url, retries=3):
+def extract_contact_iframe(url, retries=3):
     """Extracts iframes while ignoring noscript, with retries only for actual errors."""
-    session = AsyncHTMLSession()
-    
+    global session
+    if session is None:
+        session = HTMLSession()  # Ensure session is initialized
+
     for attempt in range(retries):
         try:
-            r = await session.get(url)
-            await asyncio.sleep(2)  # Prevent rapid-fire requests
+            r = session.get(url)
 
-            # Render JavaScript with increased timeout
-            await r.html.arender(timeout=10)
+            # Render JavaScript with timeout (reduce from 30s to 10s to prevent hanging)
+            r.html.render(timeout=10, sleep=2)
 
             # Parse HTML using lxml
             tree = etree.HTML(r.html.html)
@@ -57,11 +68,12 @@ async def extract_contact_iframe(url, retries=3):
 
         except Exception as e:
             log_error(f"⚠️ Attempt {attempt+1}/{retries} failed for {url}: {e}")
-            await asyncio.sleep(5)  # Wait before retrying
-
-    # If all attempts fail due to actual errors, add to failed_urls list
-    log_error(f"❌ Skipping {url} after {retries} failed attempts (due to errors).")
-    failed_urls.append(url)
+            if "Session is closed" in str(e):
+                log_error("🔄 Session closed, creating a new one...")
+                session = HTMLSession()  # Reset session if it was closed
+            elif attempt == retries - 1:
+                log_error(f"❌ Skipping {url} after {retries} failed attempts (due to errors).")
+                failed_urls.append({"page_url": url})
     return None
 
 def get_urls_from_sitemap(sitemap_url):
@@ -78,49 +90,34 @@ def get_urls_from_sitemap(sitemap_url):
 
 def run_sequentially(urls):
     """Runs all URLs sequentially to avoid crashes."""
-    results = []
-    
-    # Process URLs sequentially with a progress bar
     for url in tqdm(urls, desc="Scraping Progress"):
-        result = asyncio.run(extract_contact_iframe(url))
+        result = extract_contact_iframe(url)
         if result is not None:
-            results.extend(result)
-
-    return results
+            results.extend(result)  # Store iframe results
 
 def main():
     # Get the list of URLs from the sitemap
     sitemap_url = "https://www.sigma-rh.com/sitemap.xml"
     urls = get_urls_from_sitemap(sitemap_url)
 
-    print(f"🚀 Running in sequential mode. Processing {len(urls)} URLs...")
+    print(f"🚀 Running in sequential mode with a persistent session. Processing {len(urls)} URLs...")
 
     # Process URLs sequentially
-    results = run_sequentially(urls)
+    run_sequentially(urls)
 
     # Convert results to a DataFrame
-    df = pd.DataFrame(results, columns=["page_url", "src_url", "iframe_html"])
+    df_iframes = pd.DataFrame(results, columns=["page_url", "src_url", "iframe_html"])
+    df_failed = pd.DataFrame(failed_urls, columns=["page_url"])
+    df_no_iframe = pd.DataFrame(no_iframe_urls, columns=["page_url"])
 
-    # Save DataFrame to CSV
-    output_file = "sigma_iframes.csv"
-    df.to_csv(output_file, index=False)
+    # Save everything to CSV at the end
+    df_iframes.to_csv("sigma_iframes.csv", index=False)
+    df_failed.to_csv("failed_urls.csv", index=False)
+    df_no_iframe.to_csv("no_iframes.csv", index=False)
 
-    # Save failed URLs to a separate file
-    if failed_urls:
-        failed_file = "failed_urls.txt"
-        with open(failed_file, "w") as f:
-            for url in failed_urls:
-                f.write(url + "\n")
-        print(f"⚠️ {len(failed_urls)} URLs failed due to errors and were saved to {failed_file}")
-
-    # Save "No iframe found" URLs to a CSV
-    if no_iframe_urls:
-        no_iframe_df = pd.DataFrame(no_iframe_urls, columns=["page_url"])
-        no_iframe_file = "no_iframes.csv"
-        no_iframe_df.to_csv(no_iframe_file, index=False)
-        print(f"⚠️ {len(no_iframe_urls)} URLs had no iframes and were saved to {no_iframe_file}")
-
-    print(f"✅ Processing complete. {len(df)} valid iframes found. Results saved to {output_file}.")
+    print(f"✅ Processing complete. {len(df_iframes)} valid iframes found.")
+    print(f"⚠️ {len(df_no_iframe)} URLs had no iframes (saved to no_iframes.csv).")
+    print(f"⚠️ {len(df_failed)} URLs failed due to errors (saved to failed_urls.csv).")
 
 # Run the script
 if __name__ == "__main__":
