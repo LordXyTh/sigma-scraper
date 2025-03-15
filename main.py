@@ -25,7 +25,7 @@ async def extract_contact_iframe(url, retries=3):
             await asyncio.sleep(2)  # Prevent rapid-fire requests
 
             # Render JavaScript with increased timeout
-            await r.html.arender(timeout=30)
+            await r.html.arender(timeout=10)
 
             # Parse HTML using lxml
             tree = etree.HTML(r.html.html)
