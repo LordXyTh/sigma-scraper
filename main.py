@@ -5,6 +5,7 @@ import sys
 from lxml import etree
 from requests_html import HTMLSession
 from tqdm import tqdm
+import time
 
 # Track failed and no-iframe URLs
 failed_urls = []
@@ -14,11 +15,15 @@ results = []  # Store extracted iframes
 # Initialize a global session
 session = None
 
-def get_session():
-    """Returns an active session, creates a new one if needed."""
+def create_session():
+    """Creates a new HTML session and returns it."""
     global session
-    if session is None:
-        session = HTMLSession()
+    if session is not None:
+        try:
+            session.close()  # Close existing session safely
+        except:
+            pass
+    session = HTMLSession()
     return session
 
 def log_error(message):
@@ -28,15 +33,16 @@ def log_error(message):
 def extract_contact_iframe(url, retries=3):
     """Extracts iframes while ignoring noscript, with retries only for actual errors."""
     global session
-    if session is None:
-        session = HTMLSession()  # Ensure session is initialized
 
     for attempt in range(retries):
         try:
+            if session is None:
+                session = create_session()
+
             r = session.get(url)
 
-            # Render JavaScript with timeout (reduce from 30s to 10s to prevent hanging)
-            r.html.render(timeout=10, sleep=2)
+            # Render JavaScript with timeout (reduce from 10s to 6s to prevent hanging)
+            r.html.render(timeout=6, sleep=2)
 
             # Parse HTML using lxml
             tree = etree.HTML(r.html.html)
@@ -66,11 +72,19 @@ def extract_contact_iframe(url, retries=3):
             no_iframe_urls.append({"page_url": url})
             return None
 
+        except requests.exceptions.RequestException as e:
+            log_error(f"⚠️ Attempt {attempt+1}/{retries} failed for {url}: {e}")
+            time.sleep(3)  # Sleep before retrying
+
         except Exception as e:
             log_error(f"⚠️ Attempt {attempt+1}/{retries} failed for {url}: {e}")
-            if "Session is closed" in str(e):
-                log_error("🔄 Session closed, creating a new one...")
-                session = HTMLSession()  # Reset session if it was closed
+
+            # If the session is closed, restart it
+            if "Session is closed" in str(e) or "RuntimeError" in str(e):
+                log_error("🔄 Session closed unexpectedly, creating a new one...")
+                session = create_session()
+                time.sleep(2)  # Small delay to prevent rapid re-creation
+
             elif attempt == retries - 1:
                 log_error(f"❌ Skipping {url} after {retries} failed attempts (due to errors).")
                 failed_urls.append({"page_url": url})
@@ -90,10 +104,15 @@ def get_urls_from_sitemap(sitemap_url):
 
 def run_sequentially(urls):
     """Runs all URLs sequentially to avoid crashes."""
+    global session
+    session = create_session()  # Initialize session once at the beginning
+
     for url in tqdm(urls, desc="Scraping Progress"):
         result = extract_contact_iframe(url)
         if result is not None:
             results.extend(result)  # Store iframe results
+
+    session.close()  # Close session after scraping
 
 def main():
     # Get the list of URLs from the sitemap
